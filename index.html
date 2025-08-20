@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Custom Motel Radio – Spotify (PKCE)</title>
+  <style>
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Arial; margin: 24px; }
+    .card { max-width: 760px; margin: 0 auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,0.06); }
+    h1 { font-size: 1.35rem; margin: 0 0 8px; }
+    .muted { color: #6b7280; font-size: 0.95rem; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    input[type="text"] { flex: 1; padding: 12px 14px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 0.95rem; }
+    button { padding: 10px 14px; border: 1px solid #111827; background: #111827; color: #fff; border-radius: 10px; cursor: pointer; font-size: 0.95rem; }
+    button.secondary { background: #fff; color: #111827; border-color: #9ca3af; }
+    .small { font-size: 0.85rem; color: #6b7280; }
+    .status { padding: 8px 12px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9rem; white-space: pre-wrap; }
+  </style>
+  <script defer src="https://sdk.scdn.co/spotify-player.js"></script>
+</head>
+<body>
+  <div class="card">
+    <h1>Custom Motel Radio – Spotify (PKCE)</h1>
+    <p class="muted">Flow: 1) Login · 2) Avvia Player · 3) Play URI</p>
+
+    <div class="row" style="margin-top:10px;">
+      <button id="loginBtn">Accedi con Spotify</button>
+      <button id="logoutBtn" class="secondary">Logout</button>
+      <button id="connectBtn">Avvia Player</button>
+    </div>
+
+    <div class="row" style="margin-top:10px;">
+      <input id="uriInput" type="text" placeholder="spotify:track:... oppure context_uri (album/playlist)" />
+      <button id="playBtn">Play</button>
+      <button id="pauseBtn" class="secondary">Pause</button>
+      <button id="nextBtn" class="secondary">Next ▶▶</button>
+      <button id="prevBtn" class="secondary">◀◀ Prev</button>
+    </div>
+
+    <div class="small" style="margin-top:10px;">Device ID: <span id="deviceId">—</span></div>
+    <div id="status" class="status" style="margin-top:10px;">Pronto.</div>
+  </div>
+
+<script>
+/*** CONFIG ***/
+const CLIENT_ID = "bc3377239f1c4201bbb4769622a71a43"; // ← lascia le virgolette
+const REDIRECT_URI = window.location.origin + "/index.html"; // combacia con la Dashboard
+const SCOPES = [
+  'streaming','user-read-email','user-read-private',
+  'user-read-playback-state','user-modify-playback-state','user-read-currently-playing'
+];
+
+/*** Utils UI ***/
+function log(m){ document.getElementById('status').textContent = '['+new Date().toLocaleTimeString()+'] '+m; }
+
+/*** PKCE helpers ***/
+async function sha256(plain){ const e=new TextEncoder().encode(plain); return await crypto.subtle.digest('SHA-256', e); }
+function b64u(a){ return btoa(String.fromCharCode(...new Uint8Array(a))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function randStr(n=64){ const a=new Uint8Array(n); crypto.getRandomValues(a); return b64u(a); }
+
+/*** Auth ***/
+async function login(){
+  const verifier = randStr(64);
+  const challenge = b64u(await sha256(verifier));
+  localStorage.setItem('pkce_verifier', verifier);
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    scope: SCOPES.join(' '),
+    code_challenge_method: 'S256',
+    code_challenge: challenge
+  });
+  window.location = `https://accounts.spotify.com/authorize?${params.toString()}`;
+}
+
+async function exchangeToken(code){
+  const verifier = localStorage.getItem('pkce_verifier');
+  const body = new URLSearchParams({
+    client_id: CLIENT_ID, grant_type: 'authorization_code',
+    code, redirect_uri: REDIRECT_URI, code_verifier: verifier
+  });
+  const r = await fetch('https://accounts.spotify.com/api/token', {
+    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body
+  });
+  if(!r.ok){ throw new Error('Token exchange failed: '+(await r.text())); }
+  const d = await r.json();
+  const expiry = Date.now() + (d.expires_in - 60)*1000;
+  localStorage.setItem('access_token', d.access_token);
+  localStorage.setItem('refresh_token', d.refresh_token || '');
+  localStorage.setItem('token_expiry', String(expiry));
+  log('Access token ottenuto.');
+}
+
+async function refreshToken(){
+  const rt = localStorage.getItem('refresh_token'); if(!rt) throw new Error('No refresh token');
+  const body = new URLSearchParams({ client_id: CLIENT_ID, grant_type:'refresh_token', refresh_token: rt });
+  const r = await fetch('https://accounts.spotify.com/api/token', {
+    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body
+  });
+  if(!r.ok){ throw new Error('Refresh failed: '+(await r.text())); }
+  const d = await r.json();
+  const expiry = Date.now() + (d.expires_in - 60)*1000;
+  localStorage.setItem('access_token', d.access_token);
+  localStorage.setItem('token_expiry', String(expiry));
+  log('Access token refresh OK.');
+}
+
+function getCachedToken(){
+  const at = localStorage.getItem('access_token');
+  const exp = Number(localStorage.getItem('token_expiry')||0);
+  if(!at) return null; if(Date.now()>exp) return null; return at;
+}
+
+async function getValidToken(){
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get('code');
+  if(code){
+    // pulizia URL
+    history.replaceState({}, '', REDIRECT_URI);
+    await exchangeToken(code);
+  }
+  const cached = getCachedToken();
+  if(cached) return cached;
+  const rt = localStorage.getItem('refresh_token');
+  if(rt){ await refreshToken(); return localStorage.getItem('access_token'); }
+  throw new Error('Nessun token. Premi "Accedi con Spotify".');
+}
+
+/*** Player ***/
+let player, deviceId=null;
+window.onSpotifyWebPlaybackSDKReady = () => { log('Web Playback SDK pronto.'+ REDIRECT_URI)};
+
+async function initPlayer(){
+  const token = await getValidToken();
+  player = new Spotify.Player({
+    name:'Custom Motel Radio (PKCE)', getOAuthToken: cb => cb(token), volume:0.8
+  });
+  player.addListener('ready', ({device_id})=>{
+    deviceId = device_id; document.getElementById('deviceId').textContent = deviceId;
+    log('Player pronto. Device: '+deviceId); transferPlayback(deviceId,false).catch(e=>log(e.message));
+  });
+  player.addListener('not_ready', ({device_id})=>log('Device non pronto: '+device_id));
+  player.addListener('initialization_error', ({message})=>log('Init error: '+message));
+  player.addListener('authentication_error', ({message})=>log('Auth error: '+message));
+  player.addListener('account_error', ({message})=>log('Account error (serve Premium): '+message));
+  const ok = await player.connect(); log(ok?'Player connesso.':'Player non connesso.');
+}
+
+async function api(path, method='GET', body){
+  const token = await getValidToken();
+  const r = await fetch(`https://api.spotify.com/v1/${path}`, {
+    method, headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},
+    body: body?JSON.stringify(body):undefined
+  });
+  if(!r.ok){ const t=await r.text(); throw new Error(`${method} ${path} → ${r.status}: ${t}`); }
+  return r.status===204?null: r.json();
+}
+async function transferPlayback(id, play=false){ log('Trasferimento playback…'); await api('me/player','PUT',{device_ids:[id], play}); }
+
+// --- NUOVO: parser che accetta link open.spotify.com o URI --- //
+function parseSpotifyInput(raw) {
+  if (!raw) return null;
+  raw = raw.trim();
+
+  // Se è già un URI spotify:*
+  if (raw.startsWith('spotify:')) {
+    const isTrack = raw.startsWith('spotify:track:');
+    return isTrack ? { type: 'track', id: raw.split(':')[2], uri: raw } : detectContextFromUri(raw);
+  }
+
+  // Tenta parse URL https://open.spotify.com/...
+  try {
+    const u = new URL(raw);
+    if (!u.hostname.includes('open.spotify.com')) return null;
+
+    // path può avere prefissi locali (/intl-it/...), gestiamoli
+    const parts = u.pathname.split('/').filter(Boolean);
+    // es: ["playlist","37i9dQZF1..."]
+    const type = parts[0]; // "track" | "album" | "playlist" | "artist" ...
+    const id = (parts[1] || '').split('?')[0];
+
+    if (!id) return null;
+
+    if (type === 'track') {
+      return { type: 'track', id, uri: `spotify:track:${id}` };
+    }
+    if (type === 'album') {
+      return { type: 'album', id, context_uri: `spotify:album:${id}` };
+    }
+    if (type === 'playlist') {
+      return { type: 'playlist', id, context_uri: `spotify:playlist:${id}` };
+    }
+
+    // fallback: prova a trattarlo come track se combacia un ID spotify (22+ chars)
+    if (/^[A-Za-z0-9]{22,}$/.test(id)) {
+      return { type: 'track', id, uri: `spotify:track:${id}` };
+    }
+    return null;
+  } catch {
+    // Non è un URL valido: prova a estrarre un ID “nudo”
+    const m = raw.match(/([A-Za-z0-9]{22,})/);
+    if (m) return { type: 'track', id: m[1], uri: `spotify:track:${m[1]}` };
+    return null;
+  }
+
+  function detectContextFromUri(uri) {
+    if (uri.startsWith('spotify:album:'))   return { type: 'album', context_uri: uri };
+    if (uri.startsWith('spotify:playlist:'))return { type: 'playlist', context_uri: uri };
+    if (uri.startsWith('spotify:artist:'))  return { type: 'artist', context_uri: uri };
+    return { type: 'track', uri }; // default track
+  }
+}
+
+async function playUri(){
+  if (!deviceId) throw new Error('Device non pronto');
+  const raw = document.getElementById('uriInput').value;
+  const parsed = parseSpotifyInput(raw);
+  if (!parsed) { log('Input non riconosciuto. Incolla link/URI Spotify valido.'); return; }
+
+  // Se è una track singola usa "uris", altrimenti "context_uri"
+  const body = parsed.uri ? { uris: [parsed.uri] } : { context_uri: parsed.context_uri };
+  await api(`me/player/play?device_id=${encodeURIComponent(deviceId)}`, 'PUT', body);
+  log('▶️ Playing: ' + (parsed.uri || parsed.context_uri));
+}
+
+async function pause(){ await api('me/player/pause','PUT'); log('⏸ Pausa.'); }
+async function nextTrack(){ await api('me/player/next','POST'); log('⏭ Next'); }
+async function prevTrack(){ await api('me/player/previous','POST'); log('⏮ Prev'); }
+
+/*** UI ***/
+document.getElementById('loginBtn').addEventListener('click', ()=>login().catch(e=>log(e.message)));
+document.getElementById('logoutBtn').addEventListener('click', ()=>{ localStorage.clear(); log('Logout. Fai di nuovo Login.'); });
+document.getElementById('connectBtn').addEventListener('click', ()=>initPlayer().catch(e=>log(e.message)));
+document.getElementById('playBtn').addEventListener('click', ()=>playUri().catch(e=>log(e.message)));
+document.getElementById('pauseBtn').addEventListener('click', ()=>pause().catch(e=>log(e.message)));
+document.getElementById('nextBtn').addEventListener('click', ()=>nextTrack().catch(e=>log(e.message)));
+document.getElementById('prevBtn').addEventListener('click', ()=>prevTrack().catch(e=>log(e.message)));
+
+/*** All’avvio: se torni da login con ?code=... verrà gestito in getValidToken() ***/
+</script>
+</body>
+</html>

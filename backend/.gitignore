@@ -1,0 +1,17 @@
+# Evita di pubblicare credenziali o file temporanei
+
+# Ambiente Python
+.venv/
+__pycache__/
+*.pyc
+
+# Dotenv
+.env
+.env.*
+
+# VSCode
+.vscode/
+
+# Sistema
+.DS_Store
+Thumbs.db

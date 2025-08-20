@@ -1,0 +1,10 @@
+# FastAPI per definire le API
+fastapi==0.112.2
+# Uvicorn è il server ASGI; Render lo avvia con lo "Start command"
+uvicorn[standard]==0.30.6
+# httpx per chiamare ElevenLabs dal backend
+httpx==0.27.0
+# python-dotenv per leggere variabili d'ambiente in locale
+python-dotenv==1.0.1
+# pydantic per validazioni/Settings (già dipendenza di FastAPI)
+pydantic==2.8.2
