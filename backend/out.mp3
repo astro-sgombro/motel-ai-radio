@@ -1,0 +1,14 @@
+HTTP/1.1 422 Unprocessable Entity
+Date: Wed, 20 Aug 2025 09:42:23 GMT
+Content-Type: application/json
+Transfer-Encoding: chunked
+Connection: keep-alive
+rndr-id: 0774a913-536c-4a92
+vary: Accept-Encoding
+x-render-origin-server: uvicorn
+cf-cache-status: DYNAMIC
+Server: cloudflare
+CF-RAY: 9720f0bc1cdacb8b-MXP
+alt-svc: h3=":443"; ma=86400
+
+{"detail":[{"type":"json_invalid","loc":["body",2],"msg":"JSON decode error","input":{},"ctx":{"error":"Expecting property name enclosed in double quotes"}}]}

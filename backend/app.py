@@ -390,3 +390,22 @@ def health():
         "spotify_client_id_len": len(SPOTIFY_CLIENT_ID or ""),
         "spotify_client_secret_len": len(SPOTIFY_CLIENT_SECRET or ""),
     }
+
+
+# DEBUG: verifica che l'API key ElevenLabs sia valida chiamando un endpoint "innocuo"
+# Razionale: se risponde 200 con la lista voci, allora la chiave è OK; se 401, la chiave è sbagliata/non attiva.
+@app.get("/debug/eleven-auth")
+async def debug_eleven_auth():
+    import httpx, os
+    ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")  # legge la key da ENV
+    url = "https://api.elevenlabs.io/v1/voices"           # endpoint pubblico di listing voci
+    headers = {"xi-api-key": ELEVENLABS_API_KEY}          # header corretto per ElevenLabs
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, headers=headers)        # invia richiesta con la tua key
+        try:
+            # Propaga la risposta JSON, mantenendo lo status originale
+            return JSONResponse(status_code=r.status_code, content=r.json())
+        except Exception:
+            # Se non è JSON, ritorna un fallback leggibile
+            return JSONResponse(status_code=r.status_code, content={"text": r.text[:300]})
