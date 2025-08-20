@@ -27,6 +27,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from fastapi import Query
 
 # =========================
 # Caricamento configurazione
@@ -34,8 +35,8 @@ from pydantic import BaseModel
 load_dotenv()
 
 # --- ElevenLabs ---
-ELEVEN_KEY = os.getenv("ELEVENLABS_API_KEY")
-DEFAULT_VOICE = os.getenv("DEFAULT_VOICE_ID")           # ID voce di default
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+DEFAULT_VOICE_ID = os.getenv("DEFAULT_VOICE_ID")           # ID voce di default
 MODEL_ID = os.getenv("MODEL_ID", "eleven_flash_v2_5")   # default al modello Flash v2.5
 OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "mp3_44100_128")
 SIMILARITY_BOOST = 0.34                                  # hardcoded richiesto
@@ -218,53 +219,46 @@ class TrackURL(BaseModel):
 # ENDPOINT TTS (MP3)
 # ==========
 
+# Accetta sia POST /api/tts?text=... (query) sia POST JSON {"text":"..."}
+
+class TTSIn(BaseModel):
+    text: str  # corpo JSON
+
 @app.post("/api/tts")
-async def tts(payload: dict = Body(...)):
-    """
-    Genera TTS (non-streaming) usando ElevenLabs.
-    Accetta:
-      - text (obbligatorio)
-      - voiceId (opzionale; default dal .env)
-      - language_code (opzionale; usato dai modelli Turbo/Flash v2.5; default 'en')
-      - voice_settings (opzionale; verrà mergiato ma similarity_boost è forzato a 0.34)
-    Ritorna: audio/mpeg (MP3).
-    """
-    text = (payload or {}).get("text", "").strip()
-    voice_id = (payload or {}).get("voiceId", DEFAULT_VOICE)
-    lang = (payload or {}).get("language_code", "en")
-    incoming_voice_settings = (payload or {}).get("voice_settings", {})
+async def tts(
+    text: str | None = Query(default=None, description="Testo in query string"),
+    payload: TTSIn | None = None
+):
+    # Se non arriva in query, prova dal body JSON
+    if text is None and payload is not None:
+        text = payload.text
 
-    if not ELEVEN_KEY or not text:
-        raise HTTPException(400, "Missing API key or text")
-    if not voice_id:
-        raise HTTPException(400, "Missing voiceId (and DEFAULT_VOICE_ID not set)")
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="Parametro 'text' mancante (query o JSON).")
 
-    # Merge non distruttivo + override similarity_boost
-    voice_settings = {
-        **incoming_voice_settings,           # preserva altri parametri (es. stability) se passati
-        "similarity_boost": SIMILARITY_BOOST # forza 34% come richiesto
-    }
-
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format={OUTPUT_FORMAT}"
+    # --- chiamata ElevenLabs invariata, ma con errori propagati esplicitamente ---
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{DEFAULT_VOICE_ID}"
     headers = {
-        "xi-api-key": ELEVEN_KEY,
-        "accept": "audio/mpeg",              # richiedi MP3
-        "content-type": "application/json",
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
     }
-    body = {
+    data = {
         "text": text,
-        "model_id": MODEL_ID,                # es. "eleven_flash_v2_5"
-        "language_code": lang,               # supportato dai modelli Turbo/Flash v2.5
-        "voice_settings": voice_settings
+        "model_id": MODEL_ID,
+        "voice_settings": {"stability": 0.5, "similarity_boost": SIMILARITY_BOOST}
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(url, headers=headers, json=body)
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(url, headers=headers, json=data)
+        if r.status_code != 200:
+            # Razionale: vediamo il messaggio preciso (invalid key, voice not found, ecc.)
+            try:
+                return JSONResponse(status_code=r.status_code, content=r.json())
+            except Exception:
+                raise HTTPException(status_code=502, detail="Errore TTS upstream non-JSON.")
+        return Response(content=r.content, media_type="audio/mpeg")
 
-    if r.status_code != 200:
-        raise HTTPException(r.status_code, f"ElevenLabs error: {r.text[:500]}")
-
-    return Response(content=r.content, media_type="audio/mpeg")
 
 
 # ===========================
@@ -328,16 +322,16 @@ async def intro_from_track(req: TrackURL):
     if not track_id:
         raise HTTPException(400, "URL non valido o non relativo a una singola traccia Spotify.")
 
-    if not (ELEVEN_KEY and DEFAULT_VOICE):
+    if not (ELEVENLABS_API_KEY and DEFAULT_VOICE_ID):
         raise HTTPException(500, "Config ElevenLabs mancante (API key o default voice).")
 
     token = await get_spotify_token()
     meta = await fetch_track_info(track_id, token)
     text = build_intro_text(meta)
 
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{DEFAULT_VOICE}?output_format={OUTPUT_FORMAT}"
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{DEFAULT_VOICE_ID}?output_format={OUTPUT_FORMAT}"
     headers = {
-        "xi-api-key": ELEVEN_KEY,
+        "xi-api-key": ELEVENLABS_API_KEY,
         "accept": "audio/mpeg",
         "content-type": "application/json",
     }
@@ -366,10 +360,10 @@ async def intro_from_track(req: TrackURL):
 @app.get("/api/voices")
 async def voices():
     """Proxy semplice per elencare le voci disponibili su ElevenLabs."""
-    if not ELEVEN_KEY:
+    if not ELEVENLABS_API_KEY:
         raise HTTPException(500, "Missing ELEVENLABS_API_KEY")
     url = "https://api.elevenlabs.io/v1/voices"
-    headers = {"xi-api-key": ELEVEN_KEY}
+    headers = {"xi-api-key": ELEVENLABS_API_KEY}
     async with httpx.AsyncClient(timeout=30) as client:
         res = await client.get(url, headers=headers)
     if res.status_code != 200:
@@ -380,8 +374,8 @@ async def voices():
 @app.get("/health")
 def health():
     return {
-        "env_loaded": bool(ELEVEN_KEY),
-        "has_default_voice": bool(DEFAULT_VOICE),
+        "env_loaded": bool(ELEVENLABS_API_KEY),
+        "has_default_voice": bool(DEFAULT_VOICE_ID),
         "model_id": MODEL_ID,
         "output_format": OUTPUT_FORMAT,
         "similarity_boost": SIMILARITY_BOOST,
